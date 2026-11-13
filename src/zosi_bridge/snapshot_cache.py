@@ -62,6 +62,8 @@ class SnapshotCache:
         self._cache_lock = threading.Lock()
         self._entries: dict[str, SnapshotEntry] = {}
         self._errors: dict[str, str] = {}
+        self._failures: dict[str, int] = {}
+        self._backoff_until: dict[str, float] = {}
         self._stats: dict[str, int] = {
             "hits": 0,
             "stale_hits": 0,
@@ -92,8 +94,8 @@ class SnapshotCache:
                 self._cold_locks[cam_id] = lock
             return lock
 
-    def _fetch_from_go2rtc(self, cam_id: str) -> bytes:
-        src = urllib.parse.quote(f"{cam_id}_hd", safe="")
+    def _fetch_stream_jpeg(self, stream_name: str) -> bytes:
+        src = urllib.parse.quote(stream_name, safe="")
         url = f"{self.go2rtc_url}/api/frame.jpeg?src={src}"
         req = urllib.request.Request(url, method="GET")
         with urllib.request.urlopen(req, timeout=self.fetch_timeout) as resp:
@@ -104,6 +106,25 @@ class SnapshotCache:
         if not data or not data.startswith(b"\xff\xd8"):
             raise ValueError("go2rtc response is not a valid JPEG payload")
         return data
+
+    def _fetch_from_go2rtc(self, cam_id: str) -> bytes:
+        last_exc: Exception | None = None
+        for suffix in ("_hd", "_sd"):
+            try:
+                return self._fetch_stream_jpeg(f"{cam_id}{suffix}")
+            except (
+                urllib.error.URLError,
+                http.client.HTTPException,
+                TimeoutError,
+                OSError,
+                ValueError,
+                RuntimeError,
+            ) as exc:
+                last_exc = exc
+                if suffix == "_hd":
+                    LOG.debug("[%s] HD snapshot fetch failed (%s), falling back to SD", cam_id, exc)
+        assert last_exc is not None
+        raise last_exc
 
     def refresh_now(self, cam_id: str) -> bool:
         """Synchronously fetch and update the RAM cache for *cam_id*."""
@@ -118,8 +139,13 @@ class SnapshotCache:
             ValueError,
             RuntimeError,
         ) as exc:
+            now_mono = time.monotonic()
             with self._cache_lock:
                 self._errors[cam_id] = str(exc)
+                failures = self._failures.get(cam_id, 0) + 1
+                self._failures[cam_id] = failures
+                backoff = min(60.0, self.ttl * (2 ** min(failures - 1, 4)))
+                self._backoff_until[cam_id] = now_mono + backoff
                 self._stats["refreshes_failed"] += 1
             LOG.debug("[%s] Snapshot refresh failed: %s", cam_id, exc)
             return False
@@ -137,6 +163,8 @@ class SnapshotCache:
                 fetch_ms=fetch_ms,
             )
             self._errors.pop(cam_id, None)
+            self._failures.pop(cam_id, None)
+            self._backoff_until.pop(cam_id, None)
             self._stats["refreshes_ok"] += 1
         return True
 
@@ -301,9 +329,13 @@ class SnapshotCache:
             for cam in cams:
                 if self.stop_event.is_set() or self._closed:
                     break
+                now_mono = time.monotonic()
                 with self._cache_lock:
                     entry = self._entries.get(cam.id)
-                needs_refresh = entry is None or (time.monotonic() - entry.fetched_monotonic) >= refresh_threshold
+                    backoff_until = self._backoff_until.get(cam.id, 0.0)
+                if now_mono < backoff_until:
+                    continue
+                needs_refresh = entry is None or (now_mono - entry.fetched_monotonic) >= refresh_threshold
                 if needs_refresh:
                     self.refresh_now(cam.id)
                     if self.stagger_delay > 0 and self.stop_event.wait(self.stagger_delay):
@@ -342,33 +374,34 @@ def _make_handler(cache: SnapshotCache) -> type[http.server.BaseHTTPRequestHandl
         def log_message(self, format: str, *args: Any) -> None:
             LOG.debug("HTTP %s - %s", self.address_string(), format % args)
 
-        def _send_json(self, status_code: int, payload: dict[str, Any]) -> None:
+        def _send_json(self, status_code: int, payload: dict[str, Any], *, send_body: bool = True) -> None:
             body = (json.dumps(payload) + "\n").encode("utf-8")
             self.send_response(status_code)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
-            self.wfile.write(body)
+            if send_body:
+                self.wfile.write(body)
 
-        def do_GET(self) -> None:
+        def _serve_request(self, *, send_body: bool) -> None:
             path = urllib.parse.urlsplit(self.path).path
             if path == "/health":
-                self._send_json(200, cache.get_health_payload())
+                self._send_json(200, cache.get_health_payload(), send_body=send_body)
                 return
             if path == "/api/cameras":
-                self._send_json(200, cache.get_cameras_payload())
+                self._send_json(200, cache.get_cameras_payload(), send_body=send_body)
                 return
 
             match = _SNAPSHOT_PATH_RE.match(path)
             if match:
                 cam_id = match.group(1)
                 if not cache.is_known_camera(cam_id):
-                    self._send_json(404, {"error": f"Unknown camera {cam_id!r}"})
+                    self._send_json(404, {"error": f"Unknown camera {cam_id!r}"}, send_body=send_body)
                     return
                 entry, cache_state, age = cache.get_snapshot_entry(cam_id)
                 if entry is None:
-                    self._send_json(503, {"error": f"Snapshot unavailable for {cam_id}"})
+                    self._send_json(503, {"error": f"Snapshot unavailable for {cam_id}"}, send_body=send_body)
                     return
 
                 if_none_match = (self.headers.get("If-None-Match") or "").strip()
@@ -392,10 +425,17 @@ def _make_handler(cache: SnapshotCache) -> type[http.server.BaseHTTPRequestHandl
                 if age is not None:
                     self.send_header("X-Snapshot-Age", f"{age:.2f}")
                 self.end_headers()
-                self.wfile.write(entry.data)
+                if send_body:
+                    self.wfile.write(entry.data)
                 return
 
-            self._send_json(404, {"error": "Not found"})
+            self._send_json(404, {"error": "Not found"}, send_body=send_body)
+
+        def do_GET(self) -> None:
+            self._serve_request(send_body=True)
+
+        def do_HEAD(self) -> None:
+            self._serve_request(send_body=False)
 
     return SnapshotHandler
 

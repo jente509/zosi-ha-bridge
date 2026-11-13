@@ -22,6 +22,7 @@ class _MockGo2rtcState:
         self.lock = threading.Lock()
         self.payload = b"\xff\xd8\xff\xe0MOCKJPEG"
         self.fail_next = False
+        self.fail_paths: set[str] = set()
 
 
 def _start_mock_go2rtc(state: _MockGo2rtcState) -> tuple[http.server.ThreadingHTTPServer, str]:
@@ -32,7 +33,7 @@ def _start_mock_go2rtc(state: _MockGo2rtcState) -> tuple[http.server.ThreadingHT
         def do_GET(self) -> None:
             with state.lock:
                 state.calls[self.path] = state.calls.get(self.path, 0) + 1
-                should_fail = state.fail_next
+                should_fail = state.fail_next or (self.path in state.fail_paths)
                 body = state.payload
             if should_fail:
                 self.send_response(500)
@@ -138,6 +139,13 @@ class TestSnapshotCacheAndServer(unittest.TestCase):
                 self.assertIsNotNone(cam_info["snapshot_fetch_ms"])
                 self.assertTrue(cam_info["snapshot_etag"])
 
+            # HEAD returns 200 with ETag and empty body
+            head_req = urllib.request.Request(f"{base_url}/api/snapshot/zosi_1.jpg", method="HEAD")
+            with urllib.request.urlopen(head_req, timeout=3) as resp:
+                self.assertEqual(resp.status, 200)
+                self.assertTrue(resp.headers.get("ETag"))
+                self.assertEqual(resp.read(), b"")
+
             # Unknown camera -> 404
             with self.assertRaises(urllib.error.HTTPError) as ctx:
                 urllib.request.urlopen(f"{base_url}/api/snapshot/zosi_999.jpg", timeout=3)
@@ -162,6 +170,23 @@ class TestSnapshotCacheAndServer(unittest.TestCase):
             info = cache.get_camera_cache_info("zosi_1")
             self.assertFalse(info["snapshot_cached"])
             self.assertIn("JPEG", info["snapshot_error"])
+        finally:
+            cache.close()
+            mock_go2rtc.shutdown()
+            mock_go2rtc.server_close()
+
+    def test_hd_failure_falls_back_to_sd(self) -> None:
+        mock_state = _MockGo2rtcState()
+        mock_state.fail_paths.add("/api/frame.jpeg?src=zosi_1_hd")
+        mock_go2rtc, go2rtc_url = _start_mock_go2rtc(mock_state)
+        cams = [Camera(id="zosi_1", number=1, name="Front", mac="00:11:22:33:44:01", ip="192.168.138.11", online=True)]
+        cache = SnapshotCache(go2rtc_url=go2rtc_url, get_cameras=lambda: cams, ttl=10.0)
+        try:
+            data, state, _ = cache.get_snapshot("zosi_1")
+            self.assertEqual(data, b"\xff\xd8\xff\xe0MOCKJPEG")
+            self.assertEqual(state, "MISS")
+            self.assertEqual(mock_state.calls.get("/api/frame.jpeg?src=zosi_1_hd"), 1)
+            self.assertEqual(mock_state.calls.get("/api/frame.jpeg?src=zosi_1_sd"), 1)
         finally:
             cache.close()
             mock_go2rtc.shutdown()
