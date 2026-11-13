@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BRIDGE_CONTAINER="${ZOSI_BRIDGE_CONTAINER:-zosi-bridge}"
+GO2RTC_CONTAINER="${ZOSI_GO2RTC_CONTAINER:-zosi-go2rtc}"
+SNAPSHOT_URL="${ZOSI_SNAPSHOT_URL:-http://127.0.0.1:1985}"
+GO2RTC_URL="${ZOSI_GO2RTC_URL:-http://127.0.0.1:1984}"
+
+usage() {
+  cat <<'EOF'
+Usage: zosi <command> [args]
+
+Commands:
+  discover                     Scan camera subnet and update cameras.json / go2rtc.yaml
+  status [--live]              Show camera inventory and ONVIF/RTSP/go2rtc status
+  snapshot <cam> [out.jpg]     Fetch JPEG snapshot (<cam> can be e.g. 1 or zosi_1)
+  health                       Fetch bridge /health JSON from snapshot server
+  cameras                      Fetch /api/cameras JSON from snapshot server
+  logs [lines]                 Show recent logs for bridge and go2rtc containers
+
+Environment overrides:
+  ZOSI_BRIDGE_CONTAINER        Bridge container name (default: zosi-bridge)
+  ZOSI_GO2RTC_CONTAINER        go2rtc container name (default: zosi-go2rtc)
+  ZOSI_SNAPSHOT_URL            Snapshot cache base URL (default: http://127.0.0.1:1985)
+  ZOSI_GO2RTC_URL              go2rtc API base URL (default: http://127.0.0.1:1984)
+EOF
+}
+
+cmd="${1:-}"
+if [[ -z "$cmd" || "$cmd" == "-h" || "$cmd" == "--help" ]]; then
+  usage
+  exit 0
+fi
+shift
+
+normalize_cam_id() {
+  local raw="$1"
+  if [[ "$raw" =~ ^[0-9]+$ ]]; then
+    echo "zosi_${raw}"
+  else
+    echo "$raw"
+  fi
+}
+
+case "$cmd" in
+  discover)
+    exec docker exec "$BRIDGE_CONTAINER" python3 -m zosi_bridge discover "$@"
+    ;;
+  status)
+    exec docker exec "$BRIDGE_CONTAINER" python3 -m zosi_bridge status --live "$@"
+    ;;
+  snapshot)
+    raw_cam="${1:-}"
+    if [[ -z "$raw_cam" ]]; then
+      echo "Error: missing camera id or number" >&2
+      usage >&2
+      exit 1
+    fi
+    cam_id="$(normalize_cam_id "$raw_cam")"
+    out="${2:-${cam_id}.jpg}"
+    if ! curl -sf "${SNAPSHOT_URL%/}/api/snapshot/${cam_id}.jpg" -o "$out"; then
+      curl -sf "${GO2RTC_URL%/}/api/frame.jpeg?src=${cam_id}_hd" -o "$out"
+    fi
+    size=$(wc -c < "$out")
+    echo "Saved ${out} (${size} bytes)"
+    ;;
+  health)
+    curl -sf "${SNAPSHOT_URL%/}/health"
+    ;;
+  cameras)
+    curl -sf "${SNAPSHOT_URL%/}/api/cameras"
+    ;;
+  logs)
+    lines="${1:-50}"
+    echo "=== ${BRIDGE_CONTAINER} (last ${lines} lines) ==="
+    docker logs --tail "$lines" "$BRIDGE_CONTAINER"
+    echo ""
+    echo "=== ${GO2RTC_CONTAINER} (last ${lines} lines) ==="
+    docker logs --tail "$lines" "$GO2RTC_CONTAINER"
+    ;;
+  *)
+    echo "Unknown command: $cmd" >&2
+    usage >&2
+    exit 1
+    ;;
+esac

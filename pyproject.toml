@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zosi-ha-bridge"
+version = "0.2.0"
+description = "Auto-discovery, go2rtc config sync, RAM snapshot cache, and ONVIF-to-MQTT Home Assistant bridge for Zosi/Ansjer IP cameras"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = [
+    "paho-mqtt>=2.0.0",
+    "PyYAML>=6.0",
+]
+
+[project.scripts]
+zosi-bridge = "zosi_bridge.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
