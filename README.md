@@ -34,7 +34,7 @@ Zosi NVR kit cameras (Ansjer OEM firmware) typically live on an isolated camera 
 ## Key Features
 
 - **Zero-Touch Discovery**: Combines raw `AF_PACKET` ARP scanning with concurrent TCP `:8080` probing and ONVIF `GetDeviceInformation` / `GetNetworkInterfaces`. Assigns deterministic IDs (`zosi_1`, `zosi_2`, …) sorted by MAC address so DHCP/IP changes never break Home Assistant entities.
-- **Intel/AMD VAAPI + Low-Latency `go2rtc` Sync**: Automatically generates `go2rtc.yaml` with configurable `TRANSCODE_MODE` (`vaapi`, `libx264`, or `copy`) and fast FFmpeg probe flags (`-fflags nobuffer -flags low_delay -probesize 150000 -analyzeduration 100000`), reloading `go2rtc` cleanly via `/api/restart`.
+- **Intel/AMD VAAPI + Low-Latency `go2rtc` Sync**: Automatically generates `go2rtc.yaml` with configurable `TRANSCODE_MODE` (`vaapi`, `libx264`, or `copy`), fast FFmpeg probe flags (`-fflags nobuffer -flags low_delay -probesize 150000 -analyzeduration 100000`), and dual audio tracks (`#audio=aac#audio=copy`) so both MSE/MP4/RTSP (`AAC`) and WebRTC (`PCMA` passthrough) work in a single FFmpeg process without extra CPU overhead, reloading `go2rtc` cleanly via `/api/restart`.
 - **In-Memory RAM Snapshot Cache (`:1985`)**: Serves `/api/snapshot/<cam_id>.jpg` directly from RAM in milliseconds using *stale-while-revalidate* (`SNAPSHOT_CACHE_TTL`), staggered background refreshes (avoiding concurrent camera bursts), and instant async refreshes when motion triggers.
 - **Throttled ONVIF Motion Watcher**: Subscribes to `CellMotionDetector/Motion` via ONVIF `PullPointSubscription` with configurable `MOTION_POLL_INTERVAL` (prevents tight poll loops) and optional `MOTION_OFF_DELAY` debounce hold.
 - **Home Assistant MQTT Auto-Discovery + LWT**: Publishes `binary_sensor.<id>_motion`, `sensor.<id>_ip`, and `sensor.<id>_firmware` with `availability_mode: "all"` (`zosi/bridge/status` + `zosi/<id>/status`) and automatic re-discovery when `homeassistant/status` reports `online`.
@@ -177,7 +177,7 @@ Availability uses `availability_mode: "all"` combining `zosi/bridge/status` (wit
 ### 2. Camera Feeds & Fast Snapshots
 Add each camera in Home Assistant using **Generic Camera** (or connect `go2rtc` directly):
 
-- **Stream Source (H.264 + AAC)**: `rtsp://127.0.0.1:8554/zosi_1` *(or `zosi_1_hd` / `zosi_1_sd` for raw HEVC)*
+- **Stream Source (H.264 + AAC for RTSP/MSE, PCMA passthrough for WebRTC)**: `rtsp://127.0.0.1:8554/zosi_1` *(or `zosi_1_hd` / `zosi_1_sd` for raw HEVC)*
 - **Still Image URL (RAM-cached JPEG)**: `http://127.0.0.1:1985/api/snapshot/zosi_1.jpg`
 
 ### HTTP Endpoints (`:1985`)
@@ -189,11 +189,11 @@ Add each camera in Home Assistant using **Generic Camera** (or connect `go2rtc` 
 
 ## Performance & Tuning Notes
 
-| Mode | Video Codec | Host CPU | Notes |
-| --- | --- | --- | --- |
-| `vaapi` *(default)* | H.264 (hardware) | Very Low | Requires `/dev/dri:/dev/dri` on `zosi-go2rtc`. Sets `ffmpeg.global: -vaapi_device ...`. |
-| `libx264` | H.264 (software) | High | Fallback when no iGPU/GPU is available. |
-| `copy` | Original (`HEVC`) | Minimal | Only transcodes audio to AAC (`#video=copy#audio=aac`). Requires HEVC-capable clients. |
+| Mode | Video Codec | Audio Codecs | Host CPU | Notes |
+| --- | --- | --- | --- | --- |
+| `vaapi` *(default)* | H.264 (hardware) | `AAC` + `PCMA` (copy) | Very Low | Requires `/dev/dri:/dev/dri` on `zosi-go2rtc`. Sets `ffmpeg.global: -vaapi_device ...`. |
+| `libx264` | H.264 (software) | `AAC` + `PCMA` (copy) | High | Fallback when no iGPU/GPU is available. |
+| `copy` | Original (`HEVC`) | `AAC` + `PCMA` (copy) | Minimal | Copies HEVC video and PCMA audio while adding AAC (`#video=copy#audio=aac#audio=copy`). Requires HEVC-capable clients. |
 
 > [!TIP]
 > Keeping 24/7 continuous `preload` active on many 2K HEVC streams simultaneously can consume substantial CPU/network bandwidth on both the host and cameras. The built-in staggered **RAM snapshot cache** gives near-instant dashboard thumbnails without keeping video encoders running when nobody is watching.

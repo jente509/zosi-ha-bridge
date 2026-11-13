@@ -48,11 +48,11 @@ def render_go2rtc_yaml(
         sd_name = f"{cam.id}_sd"
         streams[hd_name] = f"rtsp://{cam.ip}:{rtsp_port}/video1"
         if mode == "vaapi":
-            streams[cam.id] = f"ffmpeg:{hd_name}#video=h264#hardware=vaapi#audio=aac"
+            streams[cam.id] = f"ffmpeg:{hd_name}#video=h264#hardware=vaapi#audio=aac#audio=copy"
         elif mode == "libx264":
-            streams[cam.id] = f"ffmpeg:{hd_name}#video=h264#audio=aac"
+            streams[cam.id] = f"ffmpeg:{hd_name}#video=h264#audio=aac#audio=copy"
         else:
-            streams[cam.id] = f"ffmpeg:{hd_name}#video=copy#audio=aac"
+            streams[cam.id] = f"ffmpeg:{hd_name}#video=copy#audio=aac#audio=copy"
         streams[sd_name] = f"rtsp://{cam.ip}:{rtsp_port}/video2"
 
     ffmpeg_cfg: dict[str, str] = {

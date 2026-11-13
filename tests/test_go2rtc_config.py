@@ -27,16 +27,16 @@ class TestGo2rtcConfig(unittest.TestCase):
         self.assertEqual(parsed["ffmpeg"]["global"], "-vaapi_device /dev/dri/renderD128")
         self.assertIn("-fflags nobuffer -flags low_delay -probesize 150000 -analyzeduration 100000", parsed["ffmpeg"]["rtsp"])
         self.assertEqual(parsed["streams"]["zosi_1_hd"], "rtsp://192.168.138.11:554/video1")
-        self.assertEqual(parsed["streams"]["zosi_1"], "ffmpeg:zosi_1_hd#video=h264#hardware=vaapi#audio=aac")
+        self.assertEqual(parsed["streams"]["zosi_1"], "ffmpeg:zosi_1_hd#video=h264#hardware=vaapi#audio=aac#audio=copy")
         self.assertEqual(parsed["streams"]["zosi_1_sd"], "rtsp://192.168.138.11:554/video2")
 
     def test_render_libx264_and_copy_modes(self) -> None:
         libx = yaml.safe_load(render_go2rtc_yaml(self.cameras, transcode_mode="libx264"))
         self.assertNotIn("global", libx["ffmpeg"])
-        self.assertEqual(libx["streams"]["zosi_1"], "ffmpeg:zosi_1_hd#video=h264#audio=aac")
+        self.assertEqual(libx["streams"]["zosi_1"], "ffmpeg:zosi_1_hd#video=h264#audio=aac#audio=copy")
 
         copy_cfg = yaml.safe_load(render_go2rtc_yaml(self.cameras, transcode_mode="copy"))
-        self.assertEqual(copy_cfg["streams"]["zosi_1"], "ffmpeg:zosi_1_hd#video=copy#audio=aac")
+        self.assertEqual(copy_cfg["streams"]["zosi_1"], "ffmpeg:zosi_1_hd#video=copy#audio=aac#audio=copy")
 
         with self.assertRaises(ValueError):
             render_go2rtc_yaml(self.cameras, transcode_mode="nvenc")
