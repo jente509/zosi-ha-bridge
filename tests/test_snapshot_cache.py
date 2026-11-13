@@ -77,9 +77,23 @@ class TestSnapshotCacheAndServer(unittest.TestCase):
             with urllib.request.urlopen(f"{base_url}/api/snapshot/zosi_1.jpg", timeout=3) as resp:
                 self.assertEqual(resp.status, 200)
                 self.assertEqual(resp.headers.get("X-Cache"), "MISS")
+                etag1 = resp.headers.get("ETag")
+                self.assertTrue(etag1)
                 self.assertEqual(resp.read(), b"\xff\xd8\xff\xe0MOCKJPEG")
 
-            # Warm HIT does not re-fetch go2rtc
+            # Warm HIT with matching If-None-Match returns 304 Not Modified
+            req_304 = urllib.request.Request(
+                f"{base_url}/api/snapshot/zosi_1.jpg",
+                headers={"If-None-Match": etag1},
+            )
+            with self.assertRaises(urllib.error.HTTPError) as ctx_304:
+                urllib.request.urlopen(req_304, timeout=3)
+            self.assertEqual(ctx_304.exception.code, 304)
+            self.assertEqual(ctx_304.exception.headers.get("ETag"), etag1)
+            self.assertEqual(ctx_304.exception.headers.get("X-Cache"), "HIT")
+            ctx_304.exception.close()
+
+            # Warm HIT without If-None-Match returns 200 and does not re-fetch go2rtc
             with urllib.request.urlopen(f"{base_url}/api/snapshot/zosi_1.jpg", timeout=3) as resp:
                 self.assertEqual(resp.status, 200)
                 self.assertEqual(resp.headers.get("X-Cache"), "HIT")
@@ -99,6 +113,7 @@ class TestSnapshotCacheAndServer(unittest.TestCase):
             while time.monotonic() < deadline:
                 with urllib.request.urlopen(f"{base_url}/api/snapshot/zosi_1.jpg", timeout=3) as resp:
                     if resp.headers.get("X-Cache") == "HIT":
+                        self.assertNotEqual(resp.headers.get("ETag"), etag1)
                         self.assertEqual(resp.read(), b"\xff\xd8\xff\xe0UPDATEDJPEG")
                         break
                 time.sleep(0.05)
@@ -111,11 +126,17 @@ class TestSnapshotCacheAndServer(unittest.TestCase):
                 self.assertEqual(health["status"], "ok")
                 self.assertEqual(health["cameras_total"], 1)
                 self.assertTrue(health["mqtt_connected"])
+                self.assertIn("cache_stats", health)
+                self.assertGreaterEqual(health["cache_stats"]["not_modified"], 1)
+                self.assertGreaterEqual(health["cache_stats"]["refreshes_ok"], 2)
 
             with urllib.request.urlopen(f"{base_url}/api/cameras", timeout=3) as resp:
                 cam_payload = json.loads(resp.read().decode("utf-8"))
                 self.assertEqual(len(cam_payload["cameras"]), 1)
-                self.assertTrue(cam_payload["cameras"][0]["snapshot_cached"])
+                cam_info = cam_payload["cameras"][0]
+                self.assertTrue(cam_info["snapshot_cached"])
+                self.assertIsNotNone(cam_info["snapshot_fetch_ms"])
+                self.assertTrue(cam_info["snapshot_etag"])
 
             # Unknown camera -> 404
             with self.assertRaises(urllib.error.HTTPError) as ctx:
@@ -141,6 +162,32 @@ class TestSnapshotCacheAndServer(unittest.TestCase):
             info = cache.get_camera_cache_info("zosi_1")
             self.assertFalse(info["snapshot_cached"])
             self.assertIn("JPEG", info["snapshot_error"])
+        finally:
+            cache.close()
+            mock_go2rtc.shutdown()
+            mock_go2rtc.server_close()
+
+    def test_warm_cache_prewarms_only_online_cameras(self) -> None:
+        mock_state = _MockGo2rtcState()
+        mock_go2rtc, go2rtc_url = _start_mock_go2rtc(mock_state)
+        cams = [
+            Camera(id="zosi_1", number=1, name="Cam 1", mac="00:11:22:33:44:01", ip="192.168.138.11", online=True),
+            Camera(id="zosi_2", number=2, name="Cam 2", mac="00:11:22:33:44:02", ip="192.168.138.12", online=False),
+            Camera(id="zosi_3", number=3, name="Cam 3", mac="00:11:22:33:44:03", ip="192.168.138.13", online=True),
+        ]
+        cache = SnapshotCache(go2rtc_url=go2rtc_url, get_cameras=lambda: cams, ttl=10.0)
+        try:
+            queued = cache.warm_cache()
+            self.assertEqual(queued, 2)
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                if cache.get_camera_cache_info("zosi_1")["snapshot_cached"] and cache.get_camera_cache_info("zosi_3")["snapshot_cached"]:
+                    break
+                time.sleep(0.02)
+            else:
+                self.fail("warm_cache did not populate online cameras in time")
+            self.assertFalse(cache.get_camera_cache_info("zosi_2")["snapshot_cached"])
+            self.assertEqual(cache.warm_cache(), 0)
         finally:
             cache.close()
             mock_go2rtc.shutdown()

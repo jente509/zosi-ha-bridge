@@ -181,9 +181,9 @@ Add each camera in Home Assistant using **Generic Camera** (or connect `go2rtc` 
 - **Still Image URL (RAM-cached JPEG)**: `http://127.0.0.1:1985/api/snapshot/zosi_1.jpg`
 
 ### HTTP Endpoints (`:1985`)
-- `GET /api/snapshot/<cam_id>.jpg` — Returns RAM-cached JPEG with `X-Cache` (`HIT` / `STALE` / `MISS`) and `X-Snapshot-Age` headers.
-- `GET /health` — JSON bridge status (`cameras_total`, `cameras_online`, `cached_snapshots`, `mqtt_connected`, `motion_states`).
-- `GET /api/cameras` — Full camera inventory with per-camera snapshot cache metadata.
+- `GET /api/snapshot/<cam_id>.jpg` — Returns RAM-cached JPEG (with startup pre-warming, `ETag` + `If-None-Match` `304 Not Modified`, `X-Cache` `HIT`/`STALE`/`MISS`, and `X-Snapshot-Age` headers).
+- `GET /health` — JSON bridge status (`cameras_total`, `cameras_online`, `cached_snapshots`, `cache_stats`, `mqtt_connected`, `motion_states`).
+- `GET /api/cameras` — Full camera inventory with per-camera snapshot cache metadata (`snapshot_fetch_ms`, `snapshot_etag`, `snapshot_age_seconds`).
 
 ---
 

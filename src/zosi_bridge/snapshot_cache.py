@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 import http.client
 import http.server
 import json
@@ -29,8 +30,10 @@ class SnapshotEntry:
     """Cached JPEG snapshot stored in RAM."""
 
     data: bytes
+    etag: str
     fetched_monotonic: float
     fetched_at: float
+    fetch_ms: float
 
 
 class SnapshotCache:
@@ -59,6 +62,14 @@ class SnapshotCache:
         self._cache_lock = threading.Lock()
         self._entries: dict[str, SnapshotEntry] = {}
         self._errors: dict[str, str] = {}
+        self._stats: dict[str, int] = {
+            "hits": 0,
+            "stale_hits": 0,
+            "misses": 0,
+            "not_modified": 0,
+            "refreshes_ok": 0,
+            "refreshes_failed": 0,
+        }
 
         self._cold_locks_guard = threading.Lock()
         self._cold_locks: dict[str, threading.Lock] = {}
@@ -96,6 +107,7 @@ class SnapshotCache:
 
     def refresh_now(self, cam_id: str) -> bool:
         """Synchronously fetch and update the RAM cache for *cam_id*."""
+        t0 = time.monotonic()
         try:
             data = self._fetch_from_go2rtc(cam_id)
         except (
@@ -108,18 +120,24 @@ class SnapshotCache:
         ) as exc:
             with self._cache_lock:
                 self._errors[cam_id] = str(exc)
+                self._stats["refreshes_failed"] += 1
             LOG.debug("[%s] Snapshot refresh failed: %s", cam_id, exc)
             return False
 
         now_mono = time.monotonic()
+        fetch_ms = round((now_mono - t0) * 1000.0, 2)
         now_wall = time.time()
+        etag = f'"{hashlib.sha256(data).hexdigest()[:16]}"'
         with self._cache_lock:
             self._entries[cam_id] = SnapshotEntry(
                 data=data,
+                etag=etag,
                 fetched_monotonic=now_mono,
                 fetched_at=now_wall,
+                fetch_ms=fetch_ms,
             )
             self._errors.pop(cam_id, None)
+            self._stats["refreshes_ok"] += 1
         return True
 
     def _run_refresh_task(self, cam_id: str) -> None:
@@ -144,17 +162,36 @@ class SnapshotCache:
                 self._inflight.discard(cam_id)
             return False
 
-    def get_snapshot(self, cam_id: str) -> tuple[bytes | None, str, float | None]:
-        """Return (jpeg_bytes, cache_status, age_seconds) using stale-while-revalidate."""
+    def warm_cache(self) -> int:
+        """Queue asynchronous initial warmup for all online uncached cameras."""
+        queued = 0
+        cams = sorted((c for c in self.get_cameras() if c.online), key=lambda c: c.number)
+        for cam in cams:
+            with self._cache_lock:
+                already_cached = cam.id in self._entries
+            if not already_cached and self.trigger_refresh(cam.id):
+                queued += 1
+        return queued
+
+    def record_not_modified(self) -> None:
+        with self._cache_lock:
+            self._stats["not_modified"] += 1
+
+    def get_snapshot_entry(self, cam_id: str) -> tuple[SnapshotEntry | None, str, float | None]:
+        """Return (SnapshotEntry, cache_status, age_seconds) using stale-while-revalidate."""
         now_mono = time.monotonic()
         with self._cache_lock:
             entry = self._entries.get(cam_id)
         if entry is not None:
             age = max(0.0, now_mono - entry.fetched_monotonic)
             if age <= self.ttl:
-                return entry.data, "HIT", age
+                with self._cache_lock:
+                    self._stats["hits"] += 1
+                return entry, "HIT", age
+            with self._cache_lock:
+                self._stats["stale_hits"] += 1
             self.trigger_refresh(cam_id)
-            return entry.data, "STALE", age
+            return entry, "STALE", age
 
         cold_lock = self._cold_lock_for(cam_id)
         with cold_lock:
@@ -162,15 +199,27 @@ class SnapshotCache:
                 entry = self._entries.get(cam_id)
             if entry is not None:
                 age = max(0.0, time.monotonic() - entry.fetched_monotonic)
-                return entry.data, "HIT" if age <= self.ttl else "STALE", age
+                status = "HIT" if age <= self.ttl else "STALE"
+                with self._cache_lock:
+                    self._stats["hits" if status == "HIT" else "stale_hits"] += 1
+                return entry, status, age
 
             if self.refresh_now(cam_id):
                 with self._cache_lock:
                     entry = self._entries.get(cam_id)
                 if entry is not None:
                     age = max(0.0, time.monotonic() - entry.fetched_monotonic)
-                    return entry.data, "MISS", age
+                    with self._cache_lock:
+                        self._stats["misses"] += 1
+                    return entry, "MISS", age
+        with self._cache_lock:
+            self._stats["misses"] += 1
         return None, "MISS", None
+
+    def get_snapshot(self, cam_id: str) -> tuple[bytes | None, str, float | None]:
+        """Return (jpeg_bytes, cache_status, age_seconds) using stale-while-revalidate."""
+        entry, status, age = self.get_snapshot_entry(cam_id)
+        return (entry.data if entry is not None else None), status, age
 
     def is_known_camera(self, cam_id: str) -> bool:
         with self._cache_lock:
@@ -188,12 +237,16 @@ class SnapshotCache:
                 "snapshot_cached": False,
                 "snapshot_age_seconds": None,
                 "snapshot_bytes": 0,
+                "snapshot_fetch_ms": None,
+                "snapshot_etag": None,
                 "snapshot_error": err,
             }
         return {
             "snapshot_cached": True,
             "snapshot_age_seconds": round(max(0.0, now_mono - entry.fetched_monotonic), 2),
             "snapshot_bytes": len(entry.data),
+            "snapshot_fetch_ms": entry.fetch_ms,
+            "snapshot_etag": entry.etag,
             "snapshot_error": err,
         }
 
@@ -201,6 +254,7 @@ class SnapshotCache:
         cams = self.get_cameras()
         with self._cache_lock:
             cached_count = len(self._entries)
+            stats_copy = dict(self._stats)
         runtime = self.get_runtime_status() if self.get_runtime_status else {}
         return {
             "status": "ok",
@@ -209,6 +263,7 @@ class SnapshotCache:
             "cameras_online": sum(1 for c in cams if c.online),
             "cached_snapshots": cached_count,
             "cache_ttl_seconds": self.ttl,
+            "cache_stats": stats_copy,
             **runtime,
         }
 
@@ -236,6 +291,7 @@ class SnapshotCache:
         return {"cameras": items}
 
     def _refresh_loop(self) -> None:
+        self.warm_cache()
         while not self.stop_event.is_set() and not self._closed:
             cams = sorted(
                 (c for c in self.get_cameras() if c.online),
@@ -310,19 +366,33 @@ def _make_handler(cache: SnapshotCache) -> type[http.server.BaseHTTPRequestHandl
                 if not cache.is_known_camera(cam_id):
                     self._send_json(404, {"error": f"Unknown camera {cam_id!r}"})
                     return
-                data, cache_state, age = cache.get_snapshot(cam_id)
-                if data is None:
+                entry, cache_state, age = cache.get_snapshot_entry(cam_id)
+                if entry is None:
                     self._send_json(503, {"error": f"Snapshot unavailable for {cam_id}"})
                     return
+
+                if_none_match = (self.headers.get("If-None-Match") or "").strip()
+                if if_none_match and if_none_match in (entry.etag, "*"):
+                    cache.record_not_modified()
+                    self.send_response(304)
+                    self.send_header("ETag", entry.etag)
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("X-Cache", cache_state)
+                    if age is not None:
+                        self.send_header("X-Snapshot-Age", f"{age:.2f}")
+                    self.end_headers()
+                    return
+
                 self.send_response(200)
                 self.send_header("Content-Type", "image/jpeg")
-                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Content-Length", str(len(entry.data)))
+                self.send_header("ETag", entry.etag)
                 self.send_header("Cache-Control", "no-store")
                 self.send_header("X-Cache", cache_state)
                 if age is not None:
                     self.send_header("X-Snapshot-Age", f"{age:.2f}")
                 self.end_headers()
-                self.wfile.write(data)
+                self.wfile.write(entry.data)
                 return
 
             self._send_json(404, {"error": "Not found"})
