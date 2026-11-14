@@ -6,7 +6,7 @@ services:
       dockerfile: docker/Dockerfile
     restart: unless-stopped
     mem_limit: ${BRIDGE_MEM_LIMIT:-512m}
-    pids_limit: ${BRIDGE_PIDS_LIMIT:-64}
+    pids_limit: ${BRIDGE_PIDS_LIMIT:-256}
     cap_add:
       - NET_RAW
     extra_hosts:
