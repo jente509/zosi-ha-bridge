@@ -41,6 +41,29 @@ Zosi NVR kit cameras (Ansjer OEM firmware) typically live on an isolated camera 
 
 ---
 
+## Tested & Probably Supported Cameras
+
+### Tested & Verified
+Running 24/7 in production on 7 PoE kit cameras:
+
+| Brand / OEM | ONVIF Model | Firmware | Streams & Audio | Status |
+| --- | --- | --- | --- | --- |
+| **Zosi (Ansjer OEM PoE NVR Kit)** | `IPCamera` (`hw 1.0`) | `V4.2.8.730201432EA` | `/video1` (2560×1440 HEVC) + `/video2` (640×360 HEVC) + `PCMA/8000` | Tested (4 units): discovery, ONVIF motion, RTSP, WebRTC/MSE, snapshots |
+| **Zosi (Ansjer OEM PoE NVR Kit)** | `IPCamera` (`hw 1.0`) | `V4.3.0.730201432EA` | `/video1` (2560×1440 HEVC) + `/video2` (640×360 HEVC) + `PCMA/8000` | Tested (3 units): discovery, ONVIF motion, RTSP, WebRTC/MSE, snapshots |
+
+### Probably Supported
+Any **Zosi / Ansjer OEM PoE NVR kit camera** (and closely related Ansjer rebrands) that shares the same firmware architecture:
+- Unauthenticated **ONVIF** on port `8080` (`/onvif/device_service`) with `CellMotionDetector/Motion` `PullPointSubscription` events
+- Unauthenticated **RTSP** on port `554` exposing `/video1` (main stream) and `/video2` (sub stream) in **HEVC (H.265)** or **H.264** + **PCMA (`G.711 A-law`)** audio
+- Typical Ansjer PoE camera SoCs/boards across generations:
+  - **Older pre-2020 PoE kits:** HiSilicon (`Hi3518EV200`, `Hi3516EV200`, `Hi3516EV300`, e.g., `ZG2622MW` / `2615-D` boards)
+  - **Newer 5MP / 4K PoE kits:** EEASY Tech (`SV823`, `V820`) and SigmaStar (`SSC337`)
+
+> [!NOTE]
+> **Unlikely to work out of the box:** Battery/Wi-Fi-only Zosi cameras without local ONVIF `:8080` + RTSP `:554`, or cameras that enforce ONVIF/RTSP authentication or non-`/video1`, `/video2` stream paths (unless adapted in `onvif.py` / `go2rtc_config.py`). Found it working on another firmware or kit model? Feel free to open an issue or PR to add it to the tested list!
+
+---
+
 ## Architecture
 
 ```mermaid
