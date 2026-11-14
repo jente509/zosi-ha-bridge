@@ -157,7 +157,8 @@ All options can be set via environment variables (see [`.env.example`](.env.exam
 | `MOTION_POLL_INTERVAL` | `1.5` | Minimum cycle interval (seconds) per camera for ONVIF `PullMessages` |
 | `MOTION_OFF_DELAY` | `0.0` | Optional hold delay (seconds) before transitioning `ON` → `OFF` |
 | `SNAPSHOT_SERVER_PORT` | `1985` | RAM snapshot HTTP server port (`0` disables) |
-| `SNAPSHOT_CACHE_TTL` | `10.0` | Freshness window (seconds) before background stale-while-revalidate refresh |
+| `SNAPSHOT_CACHE_TTL` | `10.0` | Freshness window (seconds) before background stale-while-revalidate refresh when active |
+| `SNAPSHOT_IDLE_REFRESH_INTERVAL` | `300.0` | Gentle background refresh interval (seconds) when no client has requested snapshots recently (`0` disables idle polling) |
 
 ---
 

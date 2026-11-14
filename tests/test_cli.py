@@ -30,6 +30,10 @@ class TestCli(unittest.TestCase):
         with mock.patch.dict(os.environ, {"MQTT_PORT": "badint"}):
             self.assertEqual(main(["status"]), 2)
 
+        with self.assertRaises(SystemExit) as ctx:
+            main(["daemon", "--snapshot-idle-ttl", "-1"])
+        self.assertEqual(ctx.exception.code, 2)
+
     def test_status_and_discover_commands(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             cams_path = Path(td) / "cameras.json"

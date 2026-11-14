@@ -47,6 +47,8 @@ class SnapshotCache:
         fetch_timeout: float = 5.0,
         stagger_delay: float = 0.4,
         max_workers: int = 2,
+        idle_refresh_interval: float = 300.0,
+        active_window: float | None = None,
         stop_event: threading.Event | None = None,
         get_runtime_status: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
@@ -55,6 +57,12 @@ class SnapshotCache:
         self.ttl = max(0.1, float(ttl))
         self.fetch_timeout = max(0.5, float(fetch_timeout))
         self.stagger_delay = max(0.0, float(stagger_delay))
+        self.idle_refresh_interval = max(0.0, float(idle_refresh_interval))
+        self.active_window = (
+            max(1.0, float(active_window))
+            if active_window is not None
+            else max(60.0, self.ttl * 6.0)
+        )
         self.stop_event = stop_event or threading.Event()
         self.get_runtime_status = get_runtime_status
         self.started_at = time.monotonic()
@@ -64,6 +72,7 @@ class SnapshotCache:
         self._errors: dict[str, str] = {}
         self._failures: dict[str, int] = {}
         self._backoff_until: dict[str, float] = {}
+        self._last_request_monotonic: float | None = None
         self._stats: dict[str, int] = {
             "hits": 0,
             "stale_hits": 0,
@@ -85,6 +94,18 @@ class SnapshotCache:
             thread_name_prefix="snapshot-fetch",
         )
         self._bg_thread: threading.Thread | None = None
+
+    def mark_activity(self) -> None:
+        """Record an interactive snapshot request to keep refresh cadence active."""
+        with self._cache_lock:
+            self._last_request_monotonic = time.monotonic()
+
+    def is_active_window(self, now_mono: float | None = None) -> bool:
+        """Return True if a client requested a snapshot within active_window seconds."""
+        now = time.monotonic() if now_mono is None else now_mono
+        with self._cache_lock:
+            last_req = self._last_request_monotonic
+        return last_req is not None and (now - last_req) <= self.active_window
 
     def _cold_lock_for(self, cam_id: str) -> threading.Lock:
         with self._cold_locks_guard:
@@ -176,8 +197,13 @@ class SnapshotCache:
             with self._inflight_lock:
                 self._inflight.discard(cam_id)
 
-    def trigger_refresh(self, cam_id: str) -> bool:
+    def trigger_refresh(self, cam_id: str, *, respect_backoff: bool = False) -> bool:
         """Schedule an asynchronous refresh for *cam_id*, deduplicated per camera."""
+        if respect_backoff:
+            now_mono = time.monotonic()
+            with self._cache_lock:
+                if now_mono < self._backoff_until.get(cam_id, 0.0):
+                    return False
         with self._inflight_lock:
             if self._closed or self.stop_event.is_set() or cam_id in self._inflight:
                 return False
@@ -208,6 +234,7 @@ class SnapshotCache:
     def get_snapshot_entry(self, cam_id: str) -> tuple[SnapshotEntry | None, str, float | None]:
         """Return (SnapshotEntry, cache_status, age_seconds) using stale-while-revalidate."""
         now_mono = time.monotonic()
+        self.mark_activity()
         with self._cache_lock:
             entry = self._entries.get(cam_id)
         if entry is not None:
@@ -291,6 +318,9 @@ class SnapshotCache:
             "cameras_online": sum(1 for c in cams if c.online),
             "cached_snapshots": cached_count,
             "cache_ttl_seconds": self.ttl,
+            "idle_refresh_interval_seconds": self.idle_refresh_interval,
+            "active_window_seconds": self.active_window,
+            "refresh_mode": "active" if self.is_active_window() else "idle",
             "cache_stats": stats_copy,
             **runtime,
         }
@@ -325,17 +355,32 @@ class SnapshotCache:
                 (c for c in self.get_cameras() if c.online),
                 key=lambda c: c.number,
             )
-            refresh_threshold = self.ttl * 0.8
+            now_pass = time.monotonic()
+            if self.is_active_window(now_pass):
+                refresh_threshold: float | None = self.ttl * 0.8
+            elif self.idle_refresh_interval > 0.0:
+                refresh_threshold = max(self.ttl * 0.8, self.idle_refresh_interval)
+            else:
+                refresh_threshold = None
+
             for cam in cams:
                 if self.stop_event.is_set() or self._closed:
                     break
+                with self._inflight_lock:
+                    if cam.id in self._inflight:
+                        continue
                 now_mono = time.monotonic()
                 with self._cache_lock:
                     entry = self._entries.get(cam.id)
                     backoff_until = self._backoff_until.get(cam.id, 0.0)
                 if now_mono < backoff_until:
                     continue
-                needs_refresh = entry is None or (now_mono - entry.fetched_monotonic) >= refresh_threshold
+                if entry is None:
+                    needs_refresh = True
+                elif refresh_threshold is None:
+                    needs_refresh = False
+                else:
+                    needs_refresh = (now_mono - entry.fetched_monotonic) >= refresh_threshold
                 if needs_refresh:
                     self.refresh_now(cam.id)
                     if self.stagger_delay > 0 and self.stop_event.wait(self.stagger_delay):

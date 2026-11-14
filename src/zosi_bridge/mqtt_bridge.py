@@ -50,6 +50,7 @@ class ZosiDaemon:
         snapshot_port: int = 1985,
         snapshot_host: str = "0.0.0.0",
         snapshot_cache_ttl: float = 10.0,
+        snapshot_idle_refresh_interval: float = 300.0,
         mqtt_client: Any = None,
     ) -> None:
         if mqtt_client is None and mqtt is None:
@@ -74,6 +75,7 @@ class ZosiDaemon:
         self.snapshot_port = int(snapshot_port)
         self.snapshot_host = snapshot_host
         self.snapshot_cache_ttl = float(snapshot_cache_ttl)
+        self.snapshot_idle_refresh_interval = float(snapshot_idle_refresh_interval)
 
         self.stop_event = threading.Event()
         self.cameras_lock = threading.Lock()
@@ -105,6 +107,7 @@ class ZosiDaemon:
                 go2rtc_url=self.go2rtc_url,
                 get_cameras=self._snapshot_get_cameras,
                 ttl=self.snapshot_cache_ttl,
+                idle_refresh_interval=self.snapshot_idle_refresh_interval,
                 stop_event=self.stop_event,
                 get_runtime_status=self._snapshot_runtime_status,
             )
@@ -243,7 +246,7 @@ class ZosiDaemon:
     def _on_motion_event(self, cam_id: str, is_motion: bool) -> None:
         self._publish(f"zosi/{cam_id}/motion", "ON" if is_motion else "OFF")
         if is_motion and self.snapshot_cache is not None:
-            self.snapshot_cache.trigger_refresh(cam_id)
+            self.snapshot_cache.trigger_refresh(cam_id, respect_backoff=True)
 
     def _on_availability_event(self, cam_id: str, online: bool) -> None:
         with self.cameras_lock:

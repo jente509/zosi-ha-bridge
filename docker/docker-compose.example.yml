@@ -5,6 +5,8 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     restart: unless-stopped
+    mem_limit: ${BRIDGE_MEM_LIMIT:-512m}
+    pids_limit: ${BRIDGE_PIDS_LIMIT:-64}
     cap_add:
       - NET_RAW
     extra_hosts:
@@ -40,6 +42,9 @@ services:
     container_name: zosi-go2rtc
     image: alexxit/go2rtc:latest
     restart: unless-stopped
+    # Bound memory and process/thread count so a stuck ffmpeg/VAAPI storm cannot OOM-kill the host.
+    mem_limit: ${GO2RTC_MEM_LIMIT:-2g}
+    pids_limit: ${GO2RTC_PIDS_LIMIT:-256}
     depends_on:
       zosi-bridge:
         condition: service_healthy

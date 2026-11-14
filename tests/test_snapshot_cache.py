@@ -218,6 +218,66 @@ class TestSnapshotCacheAndServer(unittest.TestCase):
             mock_go2rtc.shutdown()
             mock_go2rtc.server_close()
 
+    def test_idle_throttling_and_active_transition(self) -> None:
+        mock_state = _MockGo2rtcState()
+        mock_go2rtc, go2rtc_url = _start_mock_go2rtc(mock_state)
+        cams = [Camera(id="zosi_1", number=1, name="Front", mac="00:11:22:33:44:01", ip="192.168.138.11", online=True)]
+        stop_event = threading.Event()
+        cache = SnapshotCache(
+            go2rtc_url=go2rtc_url,
+            get_cameras=lambda: cams,
+            ttl=0.15,
+            stagger_delay=0.0,
+            idle_refresh_interval=0.0,
+            active_window=1.5,
+            stop_event=stop_event,
+        )
+        try:
+            cache.start_background_refresh()
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                if cache.get_camera_cache_info("zosi_1")["snapshot_cached"]:
+                    break
+                time.sleep(0.02)
+            else:
+                self.fail("Initial cache warmup did not run")
+
+            # While idle with idle_refresh_interval=0.0, background loop must NOT keep re-fetching
+            time.sleep(0.75)
+            with mock_state.lock:
+                idle_calls = mock_state.calls.get("/api/frame.jpeg?src=zosi_1_hd", 0)
+            self.assertEqual(idle_calls, 1)
+            self.assertEqual(cache.get_health_payload()["refresh_mode"], "idle")
+
+            # Interactive snapshot access activates aggressive ttl*0.8 background refreshes
+            data, _, _ = cache.get_snapshot("zosi_1")
+            self.assertEqual(data, b"\xff\xd8\xff\xe0MOCKJPEG")
+            self.assertEqual(cache.get_health_payload()["refresh_mode"], "active")
+
+            time.sleep(0.75)
+            with mock_state.lock:
+                active_calls = mock_state.calls.get("/api/frame.jpeg?src=zosi_1_hd", 0)
+            self.assertGreater(active_calls, 1)
+        finally:
+            stop_event.set()
+            cache.close()
+            mock_go2rtc.shutdown()
+            mock_go2rtc.server_close()
+
+    def test_trigger_refresh_respects_backoff(self) -> None:
+        mock_state = _MockGo2rtcState()
+        mock_state.fail_next = True
+        mock_go2rtc, go2rtc_url = _start_mock_go2rtc(mock_state)
+        cams = [Camera(id="zosi_1", number=1, name="Front", mac="00:11:22:33:44:01", ip="192.168.138.11", online=True)]
+        cache = SnapshotCache(go2rtc_url=go2rtc_url, get_cameras=lambda: cams, ttl=10.0)
+        try:
+            self.assertFalse(cache.refresh_now("zosi_1"))
+            self.assertFalse(cache.trigger_refresh("zosi_1", respect_backoff=True))
+        finally:
+            cache.close()
+            mock_go2rtc.shutdown()
+            mock_go2rtc.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()

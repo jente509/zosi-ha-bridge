@@ -102,7 +102,7 @@ class TestMqttBridge(unittest.TestCase):
             assert daemon.snapshot_cache is not None
             with mock.patch.object(daemon.snapshot_cache, "trigger_refresh", return_value=True) as m_refresh:
                 daemon._on_motion_event("zosi_1", True)
-                m_refresh.assert_called_once_with("zosi_1")
+                m_refresh.assert_called_once_with("zosi_1", respect_backoff=True)
             self.assertIn(("zosi/zosi_1/motion", "ON", 1, True), fake_client.published)
 
             # Shutdown publishes offline for camera and bridge, then disconnects

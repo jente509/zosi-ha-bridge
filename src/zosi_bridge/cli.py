@@ -126,6 +126,7 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         snapshot_port=args.snapshot_port,
         snapshot_host=args.snapshot_host,
         snapshot_cache_ttl=args.snapshot_ttl,
+        snapshot_idle_refresh_interval=args.snapshot_idle_ttl,
     )
 
     received_signal: list[int] = []
@@ -166,6 +167,7 @@ def build_parser() -> argparse.ArgumentParser:
     default_snapshot_port = _env_int("SNAPSHOT_SERVER_PORT", 1985)
     default_snapshot_host = os.environ.get("SNAPSHOT_SERVER_HOST", "0.0.0.0")
     default_snapshot_ttl = _env_float("SNAPSHOT_CACHE_TTL", 10.0)
+    default_snapshot_idle_ttl = _env_float("SNAPSHOT_IDLE_REFRESH_INTERVAL", 300.0)
 
     p = argparse.ArgumentParser(prog="zosi-bridge", description="Zosi/Ansjer Camera Bridge & Discovery Tool")
     p.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
@@ -212,6 +214,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_dae.add_argument("--snapshot-port", type=int, default=default_snapshot_port, help="0 disables HTTP snapshot server")
     p_dae.add_argument("--snapshot-host", default=default_snapshot_host)
     p_dae.add_argument("--snapshot-ttl", type=float, default=default_snapshot_ttl)
+    p_dae.add_argument(
+        "--snapshot-idle-ttl",
+        type=float,
+        default=default_snapshot_idle_ttl,
+        help="Background refresh interval (seconds) when idle; 0 disables idle background refreshes",
+    )
     p_dae.set_defaults(func=cmd_daemon)
 
     return p
@@ -240,6 +248,8 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
                 raise ValueError("--motion-off-delay must be >= 0")
             if args.snapshot_ttl <= 0.0:
                 raise ValueError("--snapshot-ttl must be > 0")
+            if args.snapshot_idle_ttl < 0.0:
+                raise ValueError("--snapshot-idle-ttl must be >= 0")
     except ValueError as exc:
         parser.error(str(exc))
 
